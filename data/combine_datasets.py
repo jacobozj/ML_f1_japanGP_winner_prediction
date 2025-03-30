@@ -1,44 +1,82 @@
 import pandas as pd
-import re
 
-race_df = pd.read_csv('Formula1_2025Season_RaceResults.csv')
-quali_df = pd.read_csv('Formula1_2025Season_QualifyingResults.csv')
 
-# Function to convert time strings to seconds
-def time_to_seconds(time_str):
-    if pd.isna(time_str) or time_str in ['DNF', 'DNS', 'DSQ']:
-        return None
+def merge_f1_datasets(race_results_path, qualifying_results_path):
+    # Load datasets
+    race_results = pd.read_csv(race_results_path)
+    qualifying_results = pd.read_csv(qualifying_results_path)
     
-    # For laptimes like 1:22.167
-    if ':' in str(time_str):
-        parts = str(time_str).split(':')
-        return int(parts[0]) * 60 + float(parts[1])
+    # Merge datasets on Track and Driver
+    merged_df = pd.merge(
+        race_results,
+        qualifying_results,
+        on=["Track", "Driver"],
+        how="inner"
+    )
     
-    # For time gaps like +0.895
-    elif str(time_str).startswith('+'):
-        if 'lap' in str(time_str):  # Handle "+1 lap" format
+    # Drop redundant columns
+    merged_df = merged_df.drop(columns=["Position_y", "No_y", "Team_y", "Laps_y"])
+    
+    # Rename columns for clarity
+    merged_df = merged_df.rename(columns={
+        "Position_x": "Race_Position",
+        "No_x": "Car_Number",
+        "Team_x": "Team",
+        "Laps_x": "Laps_Completed",
+        "Fastest Lap Time": "Fastest_Lap_Time",
+        "Q1": "Qualy_Q1",
+        "Q2": "Qualy_Q2",
+        "Q3": "Qualy_Q3"
+    })
+    
+    # Convert lap times to seconds (handling missing Q2/Q3 times and non-numeric values)
+    def time_to_seconds(time_str):
+        if pd.isna(time_str) or not isinstance(time_str, str):
             return None
-        return float(str(time_str).replace('+', ''))
+        time_str = time_str.replace('+', '').strip()
+        if "DNF" in time_str or "DSQ" in time_str or "lap" in time_str:
+            return None
+        try:
+            parts = time_str.split(':')
+            if len(parts) == 2:
+                minutes, seconds = map(float, parts)
+                return minutes * 60 + seconds
+            return float(time_str)  # If it's already in seconds format
+        except ValueError:
+            return None
     
-    return None
+    for col in ["Qualy_Q1", "Qualy_Q2", "Qualy_Q3"]:
+        merged_df[col] = merged_df[col].apply(time_to_seconds)
+    merged_df["Set Fastest Lap"] = merged_df["Set Fastest Lap"].replace({'Yes': 1, 'No': 0})
 
-# Process race data
-race_df['Race_Seconds'] = race_df['Time/Retired'].apply(time_to_seconds)
-race_df['Fastest_Lap_Seconds'] = race_df['Fastest Lap Time'].apply(time_to_seconds)
+    # Compute best qualifying lap time (smallest of Q1, Q2, Q3)
+    merged_df["Best_Qualy_Time"] = merged_df[["Qualy_Q1", "Qualy_Q2", "Qualy_Q3"]].min(axis=1, skipna=True)
+    
+    # Ensure race position and starting grid are integers
+    merged_df["Race_Position"] = pd.to_numeric(merged_df["Race_Position"], errors='coerce').fillna(0).astype(int)
+    merged_df["Starting Grid"] = pd.to_numeric(merged_df["Starting Grid"], errors='coerce').fillna(0).astype(int)
+    
+    # Compute race improvement (Starting Grid - Final Position)
+    merged_df["Race_Improvement"] = merged_df["Starting Grid"] - merged_df["Race_Position"]
+    
+    # Drop rows with missing values in critical columns
+    merged_df = merged_df.dropna(subset=["Race_Position", "Starting Grid", "Best_Qualy_Time"])
+    
+    # Convert categorical columns (Track, Driver, Team) into numeric values
+    for col in ["Track", "Driver", "Team"]:
+        merged_df[col] = merged_df[col].astype('category').cat.codes
+    
+    # Save merged dataset to CSV
+    merged_df.to_csv("Merged_F1_Dataset.csv", index=False)
+    
+    return merged_df
 
-# Process qualifying data
-for q in ['Q1', 'Q2', 'Q3']:
-    quali_df[f'{q}_Seconds'] = quali_df[q].apply(time_to_seconds)
+# Example usage
+race_results_path = "Formula1_2025Season_RaceResults.csv"
+qualifying_results_path = "Formula1_2025Season_QualifyingResults.csv"
+merged_f1_data = merge_f1_datasets(race_results_path, qualifying_results_path)
+print("Merged dataset saved to Merged_F1_Dataset.csv")
+print(merged_f1_data.head())
 
-# Create a combined dataframe
-combined_df = pd.merge(
-    race_df,
-    quali_df[['Track', 'No', 'Driver', 'Q1_Seconds', 'Q2_Seconds', 'Q3_Seconds']],
-    on=['Track', 'No', 'Driver'],
-    how='outer'
-)
 
-# Add additional features
-combined_df['Quali_Position'] = combined_df.groupby('Track')['Q3_Seconds'].rank()
-combined_df['Grid_Diff'] = combined_df['Starting Grid'] - combined_df['Quali_Position']
-combined_df['Finish_Quali_Diff'] = combined_df['Position'] - combined_df['Quali_Position']
+
